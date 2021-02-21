@@ -1,0 +1,8 @@
+cached-property==1.5.2
+frozendict==1.2
+genanki==0.8.1
+marko==0.9.1
+pystache==0.5.4
+PyYAML==5.3.1
+pygoogletranslation
+Google-Images-Search

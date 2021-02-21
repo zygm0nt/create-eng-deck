@@ -1,0 +1,185 @@
+from pprint import pprint
+import os
+import json
+import pickle
+from operator import itemgetter
+
+import genanki
+import marko
+import click
+from pygoogletranslation import Translator
+from google_images_search import GoogleImagesSearch
+
+_search_params = {
+    'q': '...',
+    'num': 1,
+    'fileType': 'jpg',
+#    'imgType': 'clipart|face|lineart|news|photo',
+#    'imgSize': 'LARGE|MEDIUM|SMALL',
+   # 'imgSize': 'huge|icon|large|medium|small|xlarge|xxlarge',
+   # 'imgDominantColor': 'black|blue|brown|gray|green|pink|purple|teal|white|yellow',
+   # 'rights': 'cc_publicdomain|cc_attribute|cc_sharealike|cc_noncommercial|cc_nonderived'
+}
+
+GCS_DEVELOPER_KEY = os.getenv("GCS_DEVELOPER_KEY")
+GCS_CX = os.getenv("GCS_CX")
+print(f"Current Google credentials are: {GCS_CX=}, {GCS_DEVELOPER_KEY=}")
+gis = GoogleImagesSearch(GCS_DEVELOPER_KEY, GCS_CX)
+
+cache_file = "translation_cache.pkl"
+image_cache_dir = "image_cache"
+
+def load_or_create_translation_cache():
+  if not os.path.exists(cache_file):
+    return {}
+  with open(cache_file, "rb") as f:
+    return pickle.load(f)
+
+def persist_cache(t):
+  with open(cache_file, "wb") as f:
+    pickle.dump(t, f)
+
+translation_cache = load_or_create_translation_cache()
+
+translator = Translator()
+
+def get_translation(query):
+  if query in translation_cache:
+    return translation_cache[query]
+  else:
+    translation = translator.translate(query, dest='pl').text
+    translation_cache[query] = translation
+    return translation
+
+def download_image(query):
+  _search_params['q'] = query
+  gis.search(
+      search_params=_search_params,
+      path_to_dir=image_cache_dir,
+      width=500,
+      height=500,
+      custom_image_name=query
+      )
+
+
+def get_word_image(query):
+  image_path = os.path.join(image_cache_dir, f"{query}.jpg")
+  if not os.path.exists(image_path):
+    download_image(query)
+  return image_path
+
+my_model = genanki.Model(
+  32005512925,
+  'English cards model',
+  fields=[
+    {'name': 'Question'},
+    {'name': 'Answer'},
+  ],
+  templates=[
+    {
+      'name': 'Card 1',
+      'qfmt': '{{Question}}',
+      'afmt': '{{FrontSide}}<hr id="answer">{{Answer}}',
+    },
+  ])
+
+
+def flatten(l):
+  for i in l:
+    for j in i:
+      yield j
+
+class DummyDocument:
+    def __init__(self, children):
+        self.children = children
+
+def html_img(filename):
+  return f'<img src="{filename}">'
+
+def add_note(question, data):
+    translation = get_translation(question)
+    word_image = get_word_image(question)
+    print(f"{question} => {translation}")
+    document = DummyDocument(data)
+    my_note = genanki.Note(
+        model=my_model,
+        fields=[question, translation]
+        
+    )
+    my_note2 = genanki.Note(
+        model=my_model,
+        fields=[translation, question]
+        
+    )
+    my_note3 = genanki.Note(
+        model=my_model,
+        fields=[html_img(os.path.basename(word_image)), question]
+        
+    )
+ 
+    return [my_note, my_note2, my_note3], word_image
+
+
+
+def read_file(path):
+    with open(path, 'r') as f:
+        contents = f.read()
+    return marko.parse(contents)
+
+def create_deck(doc, deck_title, deck_idx):
+    all_data = []
+    inside_note = False
+    question = None
+    notes = []
+    media = []
+    for e in doc.children:
+        if type(e) is marko.block.BlankLine:
+            pass
+        if type(e) is marko.block.Heading and e.level != 1:
+            if question:
+                new_notes, image = add_note(question, all_data)
+                notes = notes + new_notes
+                media.append(image)
+            all_data = []
+            inside_note = True
+            question = e.children[0].children
+        all_data.append(e)
+    if question:
+        # notes.append(add_note(question, all_data))
+        new_notes, image = add_note(question, all_data)
+        notes = notes + new_notes
+        media.append(image)
+ 
+
+    my_deck = genanki.Deck(deck_idx, deck_title)
+
+    for note in notes:
+        my_deck.add_note(note)
+    return my_deck, media
+
+def create_all_decks(paths, base_deck_num, collection_title):
+    for idx, path in enumerate(paths):
+        title = path.split('/')[-1]
+        yield create_deck(read_file(path), f"{collection_title}::{title}", base_deck_num + idx)
+
+@click.command()
+@click.option("--base-path")
+def main(base_path, output="output.apkg"):
+  paths = [
+      os.path.join(base_path, file_name)
+      for file_name in os.listdir(base_path) if file_name.endswith('.md')
+      ]
+  with open(os.path.join(base_path, "metadata.json")) as f:
+    metadata = json.load(f)
+  decks = list(create_all_decks(paths, metadata["deck_num"],
+    metadata["deck_name"]))
+  media_files = list(flatten(map(itemgetter(1), decks)))
+
+  packaged_deck = genanki.Package(map(itemgetter(0), decks))
+  packaged_deck.media_files = media_files
+  packaged_deck.write_to_file('output.apkg')
+  persist_cache(translation_cache)
+
+
+if __name__ == "__main__":
+  main()
